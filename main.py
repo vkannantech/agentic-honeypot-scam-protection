@@ -45,47 +45,121 @@ class AnalysisResponse(BaseModel):
 # --- INTELLIGENCE EXTRACTION ENGINE ---
 class IntelligenceEngine:
     def __init__(self):
-        # Regex patterns for common indicators
-        self.url_pattern = r'https?://(?:[-\w.]|(?:%[\da-fA-F]{2}))+[/\w\.-]*'
-        # Bitcoin, Ethereum, Tron, etc. (Generic crypto address matcher)
-        self.crypto_pattern = r'\b(?:0x[a-fA-F0-9]{40}|[13][a-km-zA-HJ-NP-Z1-9]{25,34}|T[A-Za-z0-9]{33})\b'
-        self.phone_pattern = r'\b(?:\+?\d{1,3}[-.\s]?)?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}\b'
-        
-        # Keywords for classification
-        self.phishing_keywords = ['verify', 'account', 'suspended', 'login', 'bank', 'alert']
-        self.crypto_keywords = ['btc', 'eth', 'profit', 'investment', 'wallet', 'mining']
-        self.urgent_keywords = ['urgent', 'immediately', 'soon', 'expire', 'action required']
+        # --- 1. PATTERNS ---
+        self.patterns = {
+            'url': r'(?:https?://|www\.|[a-zA-Z0-9-]+\.(?:com|net|org|io|biz|info|xyz|top))[^\s]*',
+            'email': r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b',
+            'phone': r'\b(?:\+?\d{1,3}[-.\s]?)?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}\b',
+            'crypto_btc': r'\b(?:bc1|[13])[a-zA-HJ-NP-Z0-9]{25,39}\b',
+            'crypto_eth': r'\b0x[a-fA-F0-9]{40}\b',
+            'crypto_tron': r'\bT[A-Za-z0-9]{33}\b',
+            'crypto_sol': r'\b[1-9A-HJ-NP-Za-km-z]{32,44}\b',
+        }
+
+        # --- 2. KEYWORD WEIGHING ---
+        # Format: (Keyword, Score_Weight, Category_Tag)
+        self.keywords = [
+            # Urgency & Pressure
+            ('urgent', 15, 'urgency'), ('immediately', 15, 'urgency'), ('act now', 15, 'urgency'), 
+            ('suspend', 20, 'threat'), ('restrict', 20, 'threat'), ('expire', 10, 'threat'),
+            
+            # Financial & Crypto
+            ('bitcoin', 10, 'crypto'), ('btc', 10, 'crypto'), ('ethereum', 10, 'crypto'), ('usdt', 10, 'crypto'),
+            ('wallet', 10, 'crypto'), ('mining', 15, 'crypto'), ('investment', 10, 'finance'), ('profit', 15, 'finance'),
+            ('withdrawal', 10, 'finance'), ('deposit', 10, 'finance'), ('yield', 10, 'finance'),
+            
+            # Phishing & Security
+            ('verify', 15, 'phishing'), ('login', 10, 'phishing'), ('password', 20, 'phishing'), 
+            ('security alert', 20, 'phishing'), ('unusual activity', 15, 'phishing'), ('kyc', 10, 'phishing'),
+            
+            # Compensation / Lottery
+            ('lottery', 25, 'spam'), ('prize', 25, 'spam'), ('winner', 25, 'spam'), ('compensation', 20, 'spam'),
+            ('fund', 10, 'finance'), ('claim', 15, 'spam'),
+            
+            # Romance / Social Engineering
+            ('dear friend', 5, 'spam'), ('my love', 10, 'romance'), ('kindly', 5, 'spam')
+        ]
 
     def analyze(self, text: str) -> ExtractedIntelligence:
-        # 1. Entity Extraction
-        urls = list(set(re.findall(self.url_pattern, text)))
-        wallets = list(set(re.findall(self.crypto_pattern, text)))
-        phones = list(set(re.findall(self.phone_pattern, text)))
-        
-        # 2. Heuristic Classification
         text_lower = text.lower()
+        risk_score = 0
+        detected_categories = []
         
-        # Detect Threat Level
-        urgency_score = sum(1 for word in self.urgent_keywords if word in text_lower)
-        threat_level = "High" if urgency_score > 0 or urls or wallets else "Medium"
-        if not urls and not wallets and urgency_score == 0:
-            threat_level = "Low"
-
-        # Detect Scam Type
-        scam_type = "Unknown/Spam"
-        if any(w in text_lower for w in self.crypto_keywords) or wallets:
-            scam_type = "Crypto/Investment Fraud"
-        elif any(w in text_lower for w in self.phishing_keywords) or urls:
-            scam_type = "Phishing/Credential Theft"
+        # 1. Entity Extraction
+        urls = list(set(re.findall(self.patterns['url'], text, re.IGNORECASE)))
+        phones = list(set(re.findall(self.patterns['phone'], text)))
+        
+        # Crypto Extraction
+        wallets = []
+        crypto_types = set()
+        for name, pattern in [('BTC', 'crypto_btc'), ('ETH', 'crypto_eth'), ('TRON', 'crypto_tron'), ('SOL', 'crypto_sol')]:
+            found = list(set(re.findall(self.patterns[pattern], text)))
+            if found:
+                wallets.extend(found)
+                crypto_types.add(name)
+        
+        # 2. Risk Scoring - Entities
+        if urls: risk_score += 25
+        if wallets: risk_score += 40
+        if phones: risk_score += 15
+        
+        # 3. Risk Scoring - Keywords
+        for word, score, category in self.keywords:
+            if word in text_lower:
+                risk_score += score
+                detected_categories.append(category)
+        
+        # 4. Heuristics
+        # Caps Ratio (Shouting)
+        caps_ratio = sum(1 for c in text if c.isupper()) / len(text) if text else 0
+        if caps_ratio > 0.25 and len(text) > 20: 
+            risk_score += 10
+            detected_categories.append("shouting")
             
-        # 3. Sentiment/Tone Analysis (Simple Heuristic for robustness)
-        sentiment = "Urgent/Pressuring" if urgency_score > 0 else "Neutral/Informational"
+        # Punctuation spam
+        if "!!" in text or "??" in text:
+            risk_score += 10
+            
+        # Normalize Score (Cap at 100)
+        risk_score = min(risk_score, 100)
+        
+        # 5. Classification Logic
+        threat_level = "Low"
+        if risk_score > 75: threat_level = "Critical"
+        elif risk_score > 50: threat_level = "High"
+        elif risk_score > 25: threat_level = "Medium"
+        
+        # Determine Scam Type
+        scam_type = "Potential Spam"
+        unique_cats = set(detected_categories)
+        if 'crypto' in unique_cats or wallets:
+            scam_type = f"Crypto Scam ({', '.join(crypto_types)})" if crypto_types else "Crypto Scam"
+        elif 'phishing' in unique_cats or ('threat' in unique_cats and urls):
+            scam_type = "Phishing/Security Alert"
+        elif 'spam' in unique_cats:
+             # Check if it's specifically a lottery/prize
+             if any(k in text_lower for k in ['lottery', 'prize', 'winner', 'compensation']):
+                 scam_type = "Lottery/Prize Scam"
+             else:
+                 scam_type = "Advance Fee / Spam"
+        elif 'finance' in unique_cats:
+             scam_type = "Investment/Financial Fraud"
+        elif 'romance' in unique_cats:
+            scam_type = "Romance Scam"
+        elif threat_level == "Low":
+            scam_type = "Likely Safe"
+            
+        sentiment = "Neutral"
+        if 'urgency' in detected_categories or 'threat' in detected_categories:
+            sentiment = "High Pressure / Urgent"
+        elif 'romance' in detected_categories:
+            sentiment = "Emotional / Luring"
 
         return ExtractedIntelligence(
             urls=urls,
             crypto_addresses=wallets,
             phones=phones,
-            threat_level=threat_level,
+            threat_level=f"{threat_level} (Score: {risk_score})",
             scam_type=scam_type,
             sentiment=sentiment
         )
